@@ -9,6 +9,7 @@ from extraction.buyer_contact_discovery import discover_buyer_contacts
 from validation.email_validator import validate_email
 from outreach.email_composer import compose_personalized_email
 from database.connection import get_db_connection
+from database.buyer_repository import deduplicate_buyers
 
 
 def generate_search_queries(target_product: str) -> dict:
@@ -66,6 +67,20 @@ def get_domain(url: str) -> str:
         )
     except Exception:
         return ""
+
+
+def get_buyer_key(
+    company_name: str,
+    website: str,
+    target_product: str,
+) -> tuple[str, str, str]:
+    """Build a stable key for the same buyer across page URLs and runs."""
+
+    return (
+        normalize_text(company_name),
+        get_domain(website),
+        normalize_text(target_product),
+    )
 
 
 def search_candidates(
@@ -830,6 +845,7 @@ def get_existing_buyer_status(
         cursor = connection.cursor()
 
         ensure_buyer_outreach_columns(cursor)
+        deduplicate_buyers(cursor)
 
         cursor.execute(
             """
@@ -936,6 +952,75 @@ def save_buyer_to_database(
             )
         )
 
+        cursor.execute(
+            """
+            SELECT id
+            FROM buyers
+            WHERE lower(trim(company_name)) = lower(trim(%s))
+              AND lower(trim(target_product)) = lower(trim(%s))
+              AND split_part(
+                    regexp_replace(
+                        lower(website),
+                        '^https?://(www\\.)?',
+                        ''
+                    ),
+                    '/',
+                    1
+                  ) = %s
+            ORDER BY (outreach_status = 'SENT') DESC, created_at DESC
+            LIMIT 1
+            """,
+            (
+                result.get("company_name"),
+                target_product,
+                get_domain(result.get("website", "")),
+            ),
+        )
+
+        existing_row = cursor.fetchone()
+
+        values = (
+            result.get("company_name"),
+            result.get("website"),
+            target_product,
+            emails,
+            phones,
+            result.get("classification", "BUYER"),
+            result.get("confidence", 0),
+            result.get("reason", ""),
+            result.get("source", ""),
+            result.get("source_url", ""),
+            result.get("search_query", ""),
+            result.get("email_subject", ""),
+            result.get("email_body", ""),
+        )
+
+        if existing_row:
+            cursor.execute(
+                """
+                UPDATE buyers
+                SET company_name = %s,
+                    website = %s,
+                    emails = %s,
+                    phones = %s,
+                    classification = %s,
+                    confidence = %s,
+                    reason = %s,
+                    source = %s,
+                    source_url = %s,
+                    search_query = %s,
+                    email_subject = %s,
+                    email_body = %s
+                WHERE id = %s
+                RETURNING id
+                """,
+                (*values[:2], *values[3:], existing_row[0]),
+            )
+
+            buyer_id = cursor.fetchone()[0]
+            connection.commit()
+            return buyer_id
+
         query = """
             INSERT INTO buyers (
                 company_name,
@@ -967,67 +1052,10 @@ def save_buyer_to_database(
                 %s,
                 %s
             )
-            ON CONFLICT (
-                company_name,
-                website,
-                target_product
-            )
-            DO UPDATE SET
-                emails = EXCLUDED.emails,
-                phones = EXCLUDED.phones,
-                classification = EXCLUDED.classification,
-                confidence = EXCLUDED.confidence,
-                reason = EXCLUDED.reason,
-                source = EXCLUDED.source,
-                source_url = EXCLUDED.source_url,
-                search_query = EXCLUDED.search_query,
-                email_subject = EXCLUDED.email_subject,
-                email_body = EXCLUDED.email_body
             RETURNING id
         """
 
-        cursor.execute(
-            query,
-            (
-                result.get("company_name"),
-                result.get("website"),
-                target_product,
-                emails,
-                phones,
-                result.get(
-                    "classification",
-                    "BUYER",
-                ),
-                result.get(
-                    "confidence",
-                    0,
-                ),
-                result.get(
-                    "reason",
-                    "",
-                ),
-                result.get(
-                    "source",
-                    "",
-                ),
-                result.get(
-                    "source_url",
-                    "",
-                ),
-                result.get(
-                    "search_query",
-                    "",
-                ),
-                result.get(
-                    "email_subject",
-                    "",
-                ),
-                result.get(
-                    "email_body",
-                    "",
-                ),
-            ),
-        )
+        cursor.execute(query, values)
 
         buyer_id = cursor.fetchone()[0]
         connection.commit()
@@ -1100,6 +1128,7 @@ def discover_buyers(
     reviewed_candidates = []
     unreachable_candidates = []
     qualified_buyers = []
+    seen_buyer_keys = set()
 
     # ==========================================
     # 3. PROCESS EVERY UNIQUE CANDIDATE
@@ -1270,6 +1299,17 @@ def discover_buyers(
             page_text=page_text,
             page_title=page_title,
         )
+
+        buyer_key = get_buyer_key(
+            company_name=company_name,
+            website=candidate["website"],
+            target_product=target_product,
+        )
+
+        if buyer_key in seen_buyer_keys:
+            continue
+
+        seen_buyer_keys.add(buyer_key)
 
         result = {
             "company_name": company_name,

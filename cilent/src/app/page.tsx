@@ -1,6 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+
+const DEFAULT_TARGET_PRODUCT = "Singing Bowls";
 
 type Buyer = {
   buyer_id?: number;
@@ -21,6 +23,11 @@ type Buyer = {
   outreach_status?: string;
 };
 
+type StoredBuyer = Buyer & {
+  id: number;
+  target_product?: string;
+};
+
 type DiscoveryResponse = {
   success: boolean;
   target_product: string;
@@ -33,7 +40,7 @@ type DiscoveryResponse = {
 };
 
 export default function Home() {
-  const [targetProduct, setTargetProduct] = useState("Singing Bowls");
+  const [targetProduct, setTargetProduct] = useState(DEFAULT_TARGET_PRODUCT);
   const [numResults, setNumResults] = useState(10);
 
   const [data, setData] = useState<DiscoveryResponse | null>(null);
@@ -41,6 +48,51 @@ export default function Home() {
   const [error, setError] = useState("");
   const [sendingBuyerId, setSendingBuyerId] = useState<number | null>(null);
   const [sendErrors, setSendErrors] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    async function loadSavedBuyers() {
+      setLoading(true);
+
+      try {
+        const response = await fetch("http://localhost:8000/api/buyers");
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => null);
+          throw new Error(errorData?.detail || "Saved buyers could not be loaded.");
+        }
+
+        const result: { buyers: StoredBuyer[] } = await response.json();
+        const savedBuyers = result.buyers.map((buyer) => ({
+          ...buyer,
+          buyer_id: buyer.id,
+          database_saved: true,
+          email_available: (buyer.emails ?? []).length > 0,
+        }));
+
+        setData({
+          success: true,
+          target_product:
+            savedBuyers[0]?.target_product ?? DEFAULT_TARGET_PRODUCT,
+          total_candidates_found: savedBuyers.length,
+          business_candidates_found: savedBuyers.length,
+          intent_candidates_found: 0,
+          reviewed_candidates: [],
+          unreachable_candidates: [],
+          buyers: savedBuyers,
+        });
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Saved buyers could not be loaded."
+        );
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadSavedBuyers();
+  }, []);
 
   async function discoverBuyers() {
     setLoading(true);

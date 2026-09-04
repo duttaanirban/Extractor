@@ -15,6 +15,44 @@ def ensure_buyer_outreach_columns(cursor) -> None:
     )
 
 
+def deduplicate_buyers(cursor) -> None:
+    """Keep one canonical row for each normalized buyer."""
+
+    cursor.execute(
+        """
+        WITH ranked_buyers AS (
+            SELECT
+                id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY
+                        lower(trim(company_name)),
+                        split_part(
+                            regexp_replace(
+                                lower(website),
+                                '^https?://(www\\.)?',
+                                ''
+                            ),
+                            '/',
+                            1
+                        ),
+                        lower(trim(target_product))
+                    ORDER BY
+                        (outreach_status = 'SENT') DESC,
+                        created_at DESC,
+                        id DESC
+                ) AS row_number
+            FROM buyers
+        )
+        DELETE FROM buyers
+        WHERE id IN (
+            SELECT id
+            FROM ranked_buyers
+            WHERE row_number > 1
+        )
+        """
+    )
+
+
 def get_all_buyers():
     """
     Retrieve all confirmed buyers stored in PostgreSQL.
@@ -28,31 +66,44 @@ def get_all_buyers():
         cursor = connection.cursor()
 
         ensure_buyer_outreach_columns(cursor)
+        deduplicate_buyers(cursor)
         connection.commit()
 
         query = """
             SELECT
-                id,
-                company_name,
-                website,
-                target_product,
-                emails,
-                phones,
-                classification,
-                confidence,
-                reason,
-                source,
-                source_url,
-                search_query,
-                outreach_status,
-                last_contacted_at,
-                contact_attempts,
-                last_contact_error,
-                email_subject,
-                email_body,
-                created_at
+                DISTINCT ON (
+                    lower(trim(company_name)),
+                    split_part(
+                        regexp_replace(
+                            lower(website),
+                            '^https?://(www\\.)?',
+                            ''
+                        ),
+                        '/',
+                        1
+                    ),
+                    lower(trim(target_product))
+                )
+                id, company_name, website, target_product, emails, phones,
+                classification, confidence, reason, source, source_url,
+                search_query, outreach_status, last_contacted_at,
+                contact_attempts, last_contact_error, email_subject,
+                email_body, created_at
             FROM buyers
-            ORDER BY created_at DESC
+            ORDER BY
+                lower(trim(company_name)),
+                split_part(
+                    regexp_replace(
+                        lower(website),
+                        '^https?://(www\\.)?',
+                        ''
+                    ),
+                    '/',
+                    1
+                ),
+                lower(trim(target_product)),
+                (outreach_status = 'SENT') DESC,
+                created_at DESC
         """
 
         cursor.execute(query)
