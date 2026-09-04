@@ -6,6 +6,7 @@ from extraction.website_fetcher import fetch_website
 from extraction.contact_extractor import extract_contacts
 from classification.gemini_classifier import classify_business
 from extraction.buyer_contact_discovery import discover_buyer_contacts
+from validation.email_validator import validate_email
 from database.connection import get_db_connection
 
 
@@ -753,6 +754,152 @@ def extract_buyer_name(
 
     return page_title
 
+
+def validate_emails(
+    emails: list[str],
+) -> tuple[list[str], list[dict]]:
+    """
+    Validate extracted emails and return valid emails plus invalid details.
+    """
+
+    valid_emails = []
+    invalid_emails = []
+
+    for email in dict.fromkeys(emails):
+
+        try:
+
+            validation = validate_email(email)
+
+        except Exception as error:
+
+            validation = {
+                "email": email,
+                "valid": False,
+                "reason": f"Email validation failed: {error}",
+            }
+
+        if validation.get("valid"):
+            valid_emails.append(validation["email"])
+        else:
+            invalid_emails.append(validation)
+
+    return valid_emails, invalid_emails
+
+
+CONTACT_BLOCKING_STATUSES = {
+    "QUEUED",
+    "SENT",
+    "CONTACTED",
+}
+
+
+def ensure_buyer_outreach_columns(cursor) -> None:
+    """
+    Add outreach tracking columns when an existing DB lacks them.
+    """
+
+    cursor.execute(
+        """
+        ALTER TABLE buyers
+        ADD COLUMN IF NOT EXISTS outreach_status TEXT DEFAULT 'NOT_CONTACTED',
+        ADD COLUMN IF NOT EXISTS last_contacted_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS contact_attempts INTEGER DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS last_contact_error TEXT
+        """
+    )
+
+
+def get_existing_buyer_status(
+    result: dict,
+    target_product: str,
+) -> dict:
+    """
+    Check whether this buyer already exists and was contacted.
+    """
+
+    connection = None
+    cursor = None
+
+    try:
+
+        connection = get_db_connection()
+        cursor = connection.cursor()
+
+        ensure_buyer_outreach_columns(cursor)
+
+        cursor.execute(
+            """
+            SELECT
+                id,
+                outreach_status,
+                last_contacted_at,
+                contact_attempts,
+                last_contact_error
+            FROM buyers
+            WHERE company_name = %s
+              AND website = %s
+              AND target_product = %s
+            LIMIT 1
+            """,
+            (
+                result.get("company_name"),
+                result.get("website"),
+                target_product,
+            ),
+        )
+
+        row = cursor.fetchone()
+        connection.commit()
+
+        if not row:
+            return {
+                "duplicate_buyer": False,
+                "already_contacted": False,
+                "outreach_status": "NOT_CONTACTED",
+                "last_contacted_at": None,
+                "contact_attempts": 0,
+                "last_contact_error": None,
+            }
+
+        outreach_status = (
+            row[1]
+            or "NOT_CONTACTED"
+        )
+
+        return {
+            "buyer_id": row[0],
+            "duplicate_buyer": True,
+            "already_contacted": outreach_status in CONTACT_BLOCKING_STATUSES,
+            "outreach_status": outreach_status,
+            "last_contacted_at": row[2],
+            "contact_attempts": row[3] or 0,
+            "last_contact_error": row[4],
+        }
+
+    except Exception as error:
+
+        if connection:
+            connection.rollback()
+
+        return {
+            "duplicate_buyer": False,
+            "already_contacted": False,
+            "outreach_status": "UNKNOWN",
+            "last_contacted_at": None,
+            "contact_attempts": 0,
+            "last_contact_error": str(error),
+        }
+
+    finally:
+
+        if cursor:
+            cursor.close()
+
+        if connection:
+            connection.close()
+
+
 def save_buyer_to_database(
     result: dict,
     target_product: str,
@@ -770,6 +917,8 @@ def save_buyer_to_database(
 
         connection = get_db_connection()
         cursor = connection.cursor()
+
+        ensure_buyer_outreach_columns(cursor)
 
         emails = list(
             dict.fromkeys(
@@ -1155,13 +1304,42 @@ def discover_buyers(
 
                 buyer_contact_emails = []
 
-            result["buyer_contact_emails"] = (
+            valid_emails, invalid_emails = validate_emails(
+                result.get("emails", [])
+                + buyer_contact_emails
+            )
+
+            result["raw_emails"] = result.get(
+                "emails",
+                [],
+            )
+
+            result["raw_buyer_contact_emails"] = (
                 buyer_contact_emails
             )
 
+            result["invalid_emails"] = invalid_emails
+
+            result["emails"] = valid_emails
+
+            result["buyer_contact_emails"] = (
+                []
+            )
+
             result["email_available"] = bool(
-                buyer_contact_emails
-                or result["emails"]
+                valid_emails
+            )
+
+            buyer_status = get_existing_buyer_status(
+                result=result,
+                target_product=target_product,
+            )
+
+            result.update(buyer_status)
+
+            result["ready_for_outreach"] = (
+                result["email_available"]
+                and not result["already_contacted"]
             )
 
             # ------------------------------------------
