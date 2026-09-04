@@ -6,6 +6,7 @@ from extraction.website_fetcher import fetch_website
 from extraction.contact_extractor import extract_contacts
 from validation.email_validator import validate_email
 from classification.ollama_classifier import classify_business
+from discovery.buyer_discovery import discover_buyers
 
 from search.serper import search_buyers
 
@@ -79,6 +80,23 @@ def classify_business_api(
         return classify_business(
             text=text,
             target_product=target_product,
+        )
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=str(error),
+        )
+        
+@app.post("/api/buyers/discover")
+def discover_buyers_api(
+    target_product: str,
+    num_results: int = 10,
+):
+    try:
+        return discover_buyers(
+            target_product=target_product,
+            num_results=num_results,
         )
 
     except Exception as error:
