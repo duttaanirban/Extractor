@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from extraction.result_parser import parse_search_results
 from extraction.website_fetcher import fetch_website
 from extraction.contact_extractor import extract_contacts
+from validation.email_validator import validate_email
 
 from search.serper import search_buyers
 
@@ -63,3 +64,7 @@ def extract_website(url: str):
 @app.get("/api/extraction/contacts")
 def extract_contacts_api(text: str):
     return extract_contacts(text)
+
+@app.get("/api/validation/email")
+def validate_email_api(email: str):
+    return validate_email(email)
