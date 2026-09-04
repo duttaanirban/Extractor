@@ -5,8 +5,9 @@ from extraction.result_parser import parse_search_results
 from extraction.website_fetcher import fetch_website
 from extraction.contact_extractor import extract_contacts
 from validation.email_validator import validate_email
-from classification.ollama_classifier import classify_business
+from classification.gemini_classifier import classify_business
 from discovery.buyer_discovery import discover_buyers
+from database.buyer_repository import get_all_buyers
 
 from search.serper import search_buyers
 
@@ -98,6 +99,23 @@ def discover_buyers_api(
             target_product=target_product,
             num_results=num_results,
         )
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=str(error),
+        )
+
+@app.get("/api/buyers")
+def get_saved_buyers_api():
+    try:
+        buyers = get_all_buyers()
+
+        return {
+            "success": True,
+            "count": len(buyers),
+            "buyers": buyers,
+        }
 
     except Exception as error:
         raise HTTPException(

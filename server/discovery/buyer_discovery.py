@@ -4,7 +4,7 @@ import re
 from search.serper import search_buyers
 from extraction.website_fetcher import fetch_website
 from extraction.contact_extractor import extract_contacts
-from classification.ollama_classifier import classify_business
+from classification.gemini_classifier import classify_business
 from extraction.buyer_contact_discovery import discover_buyer_contacts
 from database.connection import get_db_connection
 
@@ -118,6 +118,12 @@ def search_candidates(
                 "source": "serper",
                 "source_url": url,
                 "search_query": query,
+                "search_score": score_search_result(
+                    title=result.get("title", ""),
+                    url=url,
+                    snippet=result.get("snippet", ""),
+                    query=query,
+                ),
             })
 
     return candidates
@@ -137,6 +143,316 @@ def normalize_text(text: str) -> str:
         " ",
         text.lower(),
     ).strip()
+
+
+def score_search_result(
+    title: str,
+    url: str,
+    snippet: str,
+    query: str,
+) -> int:
+    """Prefer pages with real procurement signals."""
+
+    text = normalize_text(
+        " ".join([title, url, snippet, query])
+    )
+
+    score = 0
+
+    positive_patterns = {
+        r"\brfq\b": 8,
+        r"\brequest for quotation\b": 8,
+        r"\bpurchase inquiry\b": 7,
+        r"\bbuying inquiry\b": 7,
+        r"\blooking for (?:a )?(?:supplier|manufacturer|vendor)\b": 6,
+        r"\bseeking (?:a )?(?:supplier|manufacturer|vendor)\b": 6,
+        r"\bneed (?:a )?(?:supplier|manufacturer|vendor)\b": 5,
+        r"\bprocurement\b": 5,
+        r"\bsourcing\b": 5,
+        r"\bimporter\b": 3,
+    }
+
+    negative_patterns = {
+        r"\bshop\b": 5,
+        r"\bstore\b": 5,
+        r"\bwholesale\b": 5,
+        r"\bmanufacturer\b": 4,
+        r"\bsupplier\b": 3,
+        r"\bblog\b": 4,
+        r"\bguide\b": 4,
+        r"\breview\b": 4,
+        r"\bbest\b": 3,
+    }
+
+    for pattern, weight in positive_patterns.items():
+        if re.search(pattern, text):
+            score += weight
+
+    for pattern, weight in negative_patterns.items():
+        if re.search(pattern, text):
+            score -= weight
+
+    return score
+
+
+def extract_relevant_evidence(
+    page_text: str,
+    target_product: str,
+    max_windows: int = 8,
+    window_size: int = 260,
+) -> str:
+    """Build a compact text sample around product and intent signals."""
+
+    text = normalize_text(page_text)
+    product = normalize_text(target_product).rstrip("s")
+    terms = [
+        product,
+        "singing bowl",
+        "singing bowls",
+        "looking for",
+        "seeking",
+        "supplier",
+        "manufacturer",
+        "procurement",
+        "purchase inquiry",
+        "buying inquiry",
+        "request for quotation",
+        "rfq",
+        "sourcing",
+    ]
+
+    windows = []
+    seen = set()
+
+    for term in terms:
+        for match in re.finditer(re.escape(term), text):
+            start = max(match.start() - window_size, 0)
+            end = min(match.end() + window_size, len(text))
+            key = (start // 80, end // 80)
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            windows.append(text[start:end].strip())
+
+            if len(windows) >= max_windows:
+                return "\n---\n".join(windows)
+
+    return text[:2500]
+
+
+def has_supplier_evidence(
+    page_text: str,
+    target_product: str,
+) -> bool:
+    text = normalize_text(page_text)
+    product_pattern = re.escape(
+        normalize_text(target_product).rstrip("s")
+    ) + r"s?"
+
+    if not re.search(product_pattern, text):
+        return False
+
+    supplier_patterns = [
+        r"\b(?:we|our|shop|store|retailer|manufacturer|distributor|brand)"
+        r"\b.{0,140}\b(?:sell|selling|manufactur|distribut|wholesal|"
+        r"retail|stock|supply)\w*\b",
+        r"\b(?:sell|selling|manufactur|distribut|wholesal|retail|stock|"
+        r"supply)\w*\b.{0,140}\b(?:singing bowl|singing bowls|our)\b",
+        r"\b(?:add to cart|shop now|wholesale price|bulk order|"
+        r"product catalog)\b",
+    ]
+
+    return any(
+        re.search(pattern, text)
+        for pattern in supplier_patterns
+    )
+
+
+def is_service_provider_page(page_text: str) -> bool:
+    text = normalize_text(page_text)
+
+    service_patterns = [
+        r"\b(?:sound bath|sound healing|meditation|yoga|therapy|wellness)\b",
+        r"\b(?:classes|workshops|sessions|training|retreats?)\b",
+    ]
+
+    return any(
+        re.search(pattern, text)
+        for pattern in service_patterns
+    )
+
+
+def is_informational_page(
+    page_text: str,
+    page_title: str,
+    website: str,
+) -> bool:
+    text = normalize_text(page_text)
+    title = normalize_text(page_title)
+    url = normalize_text(website)
+
+    informational_patterns = [
+        r"/(?:blog|news|article|guide|comparison|review)(?:/|$)",
+        r"\b(?:how to|guide|tips|best|comparison|review|choosing|choose|"
+        r"demand and supply|market|news)\b",
+        r"\b(?:buyers should|buyer demand|consumer demand)\b",
+        r"\b(?:directory|membership listing|marketplace)\b",
+    ]
+
+    return any(
+        re.search(pattern, url)
+        or re.search(pattern, title)
+        or re.search(pattern, text)
+        for pattern in informational_patterns
+    )
+
+
+def has_organizational_purchase_intent(
+    page_text: str,
+    target_product: str,
+) -> bool:
+    text = normalize_text(page_text)
+    product_pattern = re.escape(
+        normalize_text(target_product).rstrip("s")
+    ) + r"s?"
+
+    return bool(
+        re.search(
+            rf"\b(?:we|our|us|company|business|organization|organisation|"
+            r"studio|center|centre|department|team|importer|buyer)\b"
+            r".{0,220}\b(?:looking for|seeking|need(?:s)?|want(?:s)? to|"
+            r"looking to|sourcing|source|procure|procurement|purchase|"
+            r"purchasing|buying|buy|rfq|request for quotation)\b"
+            rf".{{0,220}}{product_pattern}",
+            text,
+            re.IGNORECASE,
+        )
+        or re.search(
+            rf"{product_pattern}.{{0,220}}\b(?:looking for|seeking|"
+            r"need(?:s)?|sourcing|procurement|purchase inquiry|"
+            r"buying inquiry|rfq|request for quotation)\b.{0,220}"
+            r"\b(?:we|our|us|company|business|organization|organisation|"
+            r"studio|center|centre|importer|buyer)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def pre_classify_candidate(
+    page_text: str,
+    page_title: str,
+    website: str,
+    target_product: str,
+) -> dict | None:
+    """
+    Classify obvious cases without using the LLM.
+
+    Return None only when there is buyer-intent signal worth sending
+    to Gemini for judgment.
+    """
+
+    evidence = extract_relevant_evidence(
+        page_text=page_text,
+        target_product=target_product,
+    )
+
+    if not is_target_product_relevant(
+        page_text=page_text,
+        target_product=target_product,
+    ):
+        return {
+            "classification": "IRRELEVANT",
+            "confidence": 0.95,
+            "reason": (
+                "The page is not clearly about buying Singing Bowls, "
+                "or it focuses on accessories instead."
+            ),
+            "evidence": evidence,
+            "classification_source": "rules",
+        }
+
+    explicit_intent = has_explicit_purchase_intent(
+        page_text=page_text,
+        target_product=target_product,
+    )
+
+    if has_supplier_evidence(
+        page_text=page_text,
+        target_product=target_product,
+    ):
+        return {
+            "classification": "SUPPLIER",
+            "confidence": 0.9,
+            "reason": (
+                "The page indicates that the business sells, supplies, "
+                "manufactures, or wholesales Singing Bowls."
+            ),
+            "evidence": evidence,
+            "classification_source": "rules",
+        }
+
+    if is_informational_page(
+        page_text=page_text,
+        page_title=page_title,
+        website=website,
+    ) and not has_organizational_purchase_intent(
+        page_text=page_text,
+        target_product=target_product,
+    ):
+        return {
+            "classification": "INFORMATIONAL",
+            "confidence": 0.85,
+            "reason": (
+                "The page appears to be informational and does not show "
+                "the organization's own procurement intent."
+            ),
+            "evidence": evidence,
+            "classification_source": "rules",
+        }
+
+    if is_service_provider_page(page_text) and not explicit_intent:
+        return {
+            "classification": "SERVICE_PROVIDER",
+            "confidence": 0.9,
+            "reason": (
+                "The page describes sound healing, wellness, classes, "
+                "or sessions using Singing Bowls, not procurement intent."
+            ),
+            "evidence": evidence,
+            "classification_source": "rules",
+        }
+
+    if not explicit_intent:
+        return {
+            "classification": "UNCERTAIN",
+            "confidence": 0.65,
+            "reason": (
+                "The page mentions Singing Bowls but does not contain "
+                "explicit buying, sourcing, RFQ, or procurement evidence."
+            ),
+            "evidence": evidence,
+            "classification_source": "rules",
+        }
+
+    if has_organizational_purchase_intent(
+        page_text=page_text,
+        target_product=target_product,
+    ):
+        return {
+            "classification": "BUYER",
+            "confidence": 0.86,
+            "reason": (
+                "The page contains explicit organizational purchasing "
+                "or sourcing intent for Singing Bowls."
+            ),
+            "evidence": evidence,
+            "classification_source": "rules",
+        }
+
+    return None
 
 
 def is_target_product_relevant(
@@ -252,6 +568,154 @@ def is_target_product_relevant(
         return False
 
     return True
+
+
+def has_explicit_purchase_intent(
+    page_text: str,
+    target_product: str,
+) -> bool:
+    """Return True only when purchasing language is tied to the product."""
+
+    text = normalize_text(page_text)
+    product = normalize_text(target_product)
+
+    product_pattern = re.escape(product.rstrip("s")) + r"s?"
+    intent_pattern = (
+        r"(?:looking for|seeking|need(?:s)?|want(?:s)? to|"
+        r"looking to|trying to|planning to|intend(?:s)? to|"
+        r"sourcing|source|procure|procurement of|purchase|purchasing|"
+        r"buying|buy|rfq|request for quotation|requesting quotations?)"
+    )
+
+    return bool(
+        re.search(
+            rf"{intent_pattern}.{{0,180}}{product_pattern}",
+            text,
+            re.IGNORECASE,
+        )
+        or re.search(
+            rf"{product_pattern}.{{0,180}}{intent_pattern}",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def classify_candidate_evidence(
+    page_text: str,
+    page_title: str,
+    website: str,
+    classification: str,
+    reason: str,
+    target_product: str,
+) -> tuple[str, str]:
+    """Apply deterministic rules after AI classification."""
+
+    text = normalize_text(page_text)
+    reason_text = normalize_text(reason)
+    url_text = normalize_text(website)
+    title_text = normalize_text(page_title)
+    product_pattern = re.escape(
+        normalize_text(target_product).rstrip("s")
+    ) + r"s?"
+
+    supplier_patterns = [
+        r"\b(?:we|our|the company|business|shop|store|retailer|manufacturer|"
+        r"distributor|brand)\b.{0,120}\b(?:sell|selling|manufactur|"
+        r"distribut|wholesal|retail|stock|supply)\w*\b",
+        r"\b(?:sell|selling|manufactur|distribut|wholesal|retail|stock|"
+        r"supply)\w*\b.{0,120}\b(?:our|the|these|target)\b",
+        r"\b(?:we are|our business is|the company is)\s+(?:a\s+)?"
+        r"(?:supplier|seller)\b.{0,180}",
+    ]
+    service_patterns = [
+        r"\b(?:sound bath|sound healing|meditation|yoga|therapy|wellness)\b",
+        r"\b(?:classes|workshops|sessions|training|retreats?)\b",
+    ]
+    negative_reason_patterns = [
+        r"not a buyer",
+        r"service provider",
+        r"does not explicitly mention purchasing",
+        r"no evidence of purchasing intent",
+        r"uses singing bowls",
+        r"offers sound healing",
+        r"provides sound bath",
+        r"provides services",
+    ]
+    informational_patterns = [
+        r"/(?:blog|news|article|guide|comparison|review)(?:/|$)",
+        r"\b(?:how to|guide|tips|best|comparison|review|choosing|choose|"
+        r"demand and supply|market|news)\b",
+        r"\b(?:buyers should|buyer demand|consumer demand)\b",
+        r"\b(?:directory|membership listing|marketplace)\b",
+    ]
+
+    explicit_intent = has_explicit_purchase_intent(
+        page_text=page_text,
+        target_product=target_product,
+    )
+
+    organizational_intent = bool(
+        re.search(
+            rf"\b(?:we|our|us|the company|business|organization|"
+            r"studio|center|department|team)\b.{0,220}\b(?:looking for|"
+            r"seeking|need(?:s)?|want(?:s)? to|looking to|sourcing|source|"
+            r"procure|procurement|purchase|purchasing|buying|buy|rfq|"
+            rf"request for quotation)\b.{{0,220}}{product_pattern}",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+    if (
+        re.search(product_pattern, text)
+        and any(
+            re.search(pattern, text)
+            for pattern in supplier_patterns
+        )
+    ):
+        return "SUPPLIER", "The page indicates that the business supplies the target product."
+
+    supplier_reason = any(
+        re.search(pattern, reason_text)
+        for pattern in (
+            r"supplier",
+            r"seller",
+            r"sells",
+            r"supplies",
+        )
+    )
+    contradictory_supplier_reason = supplier_reason and (
+        not explicit_intent
+        or any(
+            re.search(pattern, reason_text)
+            for pattern in (r"not a buyer", r"rather than", r"not seeking")
+        )
+    )
+
+    if contradictory_supplier_reason:
+        return "SUPPLIER", "The classification evidence describes the business as a supplier or seller."
+
+    if any(re.search(pattern, reason_text) for pattern in negative_reason_patterns):
+        if any(re.search(pattern, reason_text) for pattern in (r"service provider", r"sound healing", r"sound bath", r"provides services", r"uses singing bowls")):
+            return "SERVICE_PROVIDER", "The classification evidence describes services using the target product, not procurement intent."
+        return "UNCERTAIN", "The page does not provide credible purchasing intent for the target product."
+
+    if not explicit_intent and any(re.search(pattern, text) for pattern in service_patterns):
+        return "SERVICE_PROVIDER", "The page describes services using the target product without procurement evidence."
+
+    is_informational = any(
+        re.search(pattern, url_text) or re.search(pattern, title_text) or re.search(pattern, text)
+        for pattern in informational_patterns
+    )
+
+    if is_informational and not organizational_intent:
+        return "INFORMATIONAL", "The page is informational and does not show the organization's own procurement intent."
+
+    if classification == "BUYER" and not explicit_intent:
+        return "UNCERTAIN", "No explicit purchasing, sourcing, or procurement evidence is tied to the target product."
+
+    return classification, reason
 
 
 def extract_buyer_name(
@@ -433,17 +897,7 @@ def discover_buyers(
     seen_domains = set()
 
     # ==========================================
-    # 1. BUSINESS DISCOVERY
-    # ==========================================
-
-    business_candidates = search_candidates(
-        queries=query_groups["business_queries"],
-        num_results=num_results,
-        seen_domains=seen_domains,
-    )
-
-    # ==========================================
-    # 2. BUYER-INTENT DISCOVERY
+    # 1. BUYER-INTENT DISCOVERY
     # ==========================================
 
     intent_candidates = search_candidates(
@@ -452,9 +906,27 @@ def discover_buyers(
         seen_domains=seen_domains,
     )
 
+    # ==========================================
+    # 2. BUSINESS DISCOVERY
+    # ==========================================
+
+    business_candidates = search_candidates(
+        queries=query_groups["business_queries"],
+        num_results=num_results,
+        seen_domains=seen_domains,
+    )
+
     candidates = (
-        business_candidates
-        + intent_candidates
+        intent_candidates
+        + business_candidates
+    )
+
+    candidates.sort(
+        key=lambda candidate: candidate.get(
+            "search_score",
+            0,
+        ),
+        reverse=True,
     )
 
     reviewed_candidates = []
@@ -506,26 +978,58 @@ def discover_buyers(
 
             continue
 
+        page_title = (
+            website.get("title")
+            or candidate["title"]
+        )
+
         # ==========================================
-        # 4. AI CLASSIFICATION
+        # 4. RULE-FIRST CLASSIFICATION
         # ==========================================
 
-        try:
+        classification = pre_classify_candidate(
+            page_text=page_text,
+            page_title=page_title,
+            website=candidate["website"],
+            target_product=target_product,
+        )
 
-            classification = classify_business(
-                text=page_text[:12000],
-                target_product=target_product,
-            )
+        if classification is None:
 
-        except Exception as error:
-
-            classification = {
-                "classification": "UNCERTAIN",
-                "confidence": 0,
-                "reason": (
-                    f"AI classification failed: {error}"
+            ai_context = "\n\n".join([
+                f"Page title: {page_title}",
+                f"URL: {candidate['website']}",
+                f"Search snippet: {candidate.get('snippet', '')}",
+                "Relevant page evidence:",
+                extract_relevant_evidence(
+                    page_text=page_text,
+                    target_product=target_product,
                 ),
-            }
+            ])
+
+            try:
+
+                classification = classify_business(
+                    text=ai_context[:4000],
+                    target_product=target_product,
+                )
+
+                classification["classification_source"] = "gemini"
+
+            except Exception as error:
+
+                classification = {
+                    "classification": "UNCERTAIN",
+                    "confidence": 0,
+                    "reason": (
+                        f"AI classification failed: {error}"
+                    ),
+                    "evidence": extract_relevant_evidence(
+                        page_text=page_text,
+                        target_product=target_product,
+                    ),
+                    "classification_source": "fallback",
+                }
 
         final_status = classification.get(
             "classification",
@@ -542,28 +1046,40 @@ def discover_buyers(
             "No reason provided.",
         )
 
+        evidence = classification.get(
+            "evidence",
+            "",
+        )
+
+        final_status, reason = classify_candidate_evidence(
+            page_text=page_text,
+            page_title=page_title,
+            website=candidate["website"],
+            classification=final_status,
+            reason=reason,
+            target_product=target_product,
+        )
+
         # ==========================================
         # 5. HARD PRODUCT RELEVANCE CHECK
         # ==========================================
 
-        if final_status == "BUYER":
-
-            product_relevant = (
-                is_target_product_relevant(
-                    page_text=page_text,
-                    target_product=target_product,
-                )
+        product_relevant = (
+            is_target_product_relevant(
+                page_text=page_text,
+                target_product=target_product,
             )
+        )
 
-            if not product_relevant:
+        if not product_relevant:
 
-                final_status = "IRRELEVANT"
+            final_status = "IRRELEVANT"
 
-                reason = (
-                    "The page shows purchasing intent for "
-                    "an accessory or related item rather "
-                    "than the requested target product."
-                )
+            reason = (
+                "The page shows purchasing intent for "
+                "an accessory or related item rather "
+                "than the requested target product."
+            )
 
         # ==========================================
         # 6. EXTRACT PUBLIC CONTACT INFORMATION
@@ -584,7 +1100,7 @@ def discover_buyers(
 
         company_name = extract_buyer_name(
             page_text=page_text,
-            page_title=candidate["title"],
+            page_title=page_title,
         )
 
         result = {
@@ -602,6 +1118,11 @@ def discover_buyers(
             "classification": final_status,
             "confidence": confidence,
             "reason": reason,
+            "evidence": evidence,
+            "classification_source": classification.get(
+                "classification_source",
+                "unknown",
+            ),
             "source": candidate["source"],
             "source_url": candidate["source_url"],
             "search_query": candidate["search_query"],
