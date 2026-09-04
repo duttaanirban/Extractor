@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 type Buyer = {
+  buyer_id?: number;
   company_name: string;
   page_title?: string;
   website: string;
@@ -17,6 +18,7 @@ type Buyer = {
   buyer_contact_emails?: string[];
   email_available?: boolean;
   database_saved?: boolean;
+  outreach_status?: string;
 };
 
 type DiscoveryResponse = {
@@ -25,8 +27,8 @@ type DiscoveryResponse = {
   total_candidates_found: number;
   business_candidates_found: number;
   intent_candidates_found: number;
-  reviewed_candidates: any[];
-  unreachable_candidates: any[];
+  reviewed_candidates: unknown[];
+  unreachable_candidates: unknown[];
   buyers: Buyer[];
 };
 
@@ -37,6 +39,8 @@ export default function Home() {
   const [data, setData] = useState<DiscoveryResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [sendingBuyerId, setSendingBuyerId] = useState<number | null>(null);
+  const [sendErrors, setSendErrors] = useState<Record<number, string>>({});
 
   async function discoverBuyers() {
     setLoading(true);
@@ -75,6 +79,61 @@ export default function Home() {
       );
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function sendEmail(buyer: Buyer) {
+    if (!buyer.buyer_id) {
+      return;
+    }
+
+    setSendingBuyerId(buyer.buyer_id);
+    setSendErrors((current) => {
+      const next = { ...current };
+      delete next[buyer.buyer_id as number];
+      return next;
+    });
+
+    try {
+      const response = await fetch(
+        "http://localhost:8000/api/outreach/send-gmail",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            buyer_id: buyer.buyer_id,
+            force: false,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null);
+        throw new Error(errorData?.detail || "Email could not be sent.");
+      }
+
+      setData((current) =>
+        current
+          ? {
+              ...current,
+              buyers: current.buyers.map((currentBuyer) =>
+                currentBuyer.buyer_id === buyer.buyer_id
+                  ? { ...currentBuyer, outreach_status: "SENT" }
+                  : currentBuyer
+              ),
+            }
+          : current
+      );
+    } catch (err) {
+      setSendErrors((current) => ({
+        ...current,
+        [buyer.buyer_id as number]:
+          err instanceof Error ? err.message : "Email could not be sent.",
+      }));
+    } finally {
+      setSendingBuyerId(null);
     }
   }
 
@@ -254,6 +313,7 @@ export default function Home() {
                       <th className="px-6 py-4">Email</th>
                       <th className="px-6 py-4">Phone</th>
                       <th className="px-6 py-4">Database</th>
+                      <th className="px-6 py-4">Outreach</th>
                     </tr>
                   </thead>
 
@@ -357,6 +417,41 @@ export default function Home() {
                             ) : (
                               <span className="inline-flex rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-700">
                                 Not saved
+                              </span>
+                            )}
+                          </td>
+
+                          {/* Outreach */}
+                          <td className="px-6 py-5 align-top">
+                            {buyer.outreach_status === "SENT" ? (
+                              <span className="inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-semibold text-green-700">
+                                Sent
+                              </span>
+                            ) : buyer.buyer_id ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => sendEmail(buyer)}
+                                  disabled={
+                                    sendingBuyerId === buyer.buyer_id ||
+                                    !uniqueEmails.length
+                                  }
+                                  className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  {sendingBuyerId === buyer.buyer_id
+                                    ? "Sending..."
+                                    : "Send email"}
+                                </button>
+
+                                {sendErrors[buyer.buyer_id] && (
+                                  <div className="mt-2 max-w-xs text-xs text-red-600">
+                                    {sendErrors[buyer.buyer_id]}
+                                  </div>
+                                )}
+                              </>
+                            ) : (
+                              <span className="text-xs text-slate-400">
+                                Not available
                               </span>
                             )}
                           </td>

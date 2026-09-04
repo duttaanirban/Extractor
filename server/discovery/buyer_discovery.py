@@ -906,7 +906,7 @@ def get_existing_buyer_status(
 def save_buyer_to_database(
     result: dict,
     target_product: str,
-) -> bool:
+) -> int | None:
     """
     Save a confirmed buyer to PostgreSQL.
 
@@ -983,6 +983,7 @@ def save_buyer_to_database(
                 search_query = EXCLUDED.search_query,
                 email_subject = EXCLUDED.email_subject,
                 email_body = EXCLUDED.email_body
+            RETURNING id
         """
 
         cursor.execute(
@@ -1028,9 +1029,10 @@ def save_buyer_to_database(
             ),
         )
 
+        buyer_id = cursor.fetchone()[0]
         connection.commit()
 
-        return True
+        return buyer_id
 
     except Exception as error:
 
@@ -1041,7 +1043,7 @@ def save_buyer_to_database(
         if connection:
             connection.rollback()
 
-        return False
+        return None
 
     finally:
 
@@ -1381,7 +1383,8 @@ def discover_buyers(
                 target_product=target_product,
             )
 
-            result["database_saved"] = database_saved
+            result["database_saved"] = database_saved is not None
+            result["buyer_id"] = database_saved
 
             qualified_buyers.append(result)
 
