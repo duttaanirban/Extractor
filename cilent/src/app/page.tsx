@@ -9,6 +9,7 @@ type Buyer = {
   company_name: string;
   page_title?: string;
   website: string;
+  target_product?: string;
   emails?: string[];
   phones?: string[];
   classification: string;
@@ -39,6 +40,36 @@ type DiscoveryResponse = {
   buyers: Buyer[];
 };
 
+async function fetchSavedBuyers(): Promise<StoredBuyer[]> {
+  const response = await fetch("http://localhost:8000/api/buyers");
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.detail || "Saved buyers could not be loaded.");
+  }
+
+  const result: { buyers: StoredBuyer[] } = await response.json();
+  return result.buyers;
+}
+
+function normalizeBuyer(buyer: StoredBuyer): Buyer {
+  return {
+    ...buyer,
+    buyer_id: buyer.id,
+    database_saved: true,
+    email_available: (buyer.emails ?? []).length > 0,
+  };
+}
+
+function getBuyerIdentity(buyer: Buyer) {
+  const websiteHost = buyer.website
+    .toLowerCase()
+    .replace(/^https?:\/\/(www\.)?/, "")
+    .split("/")[0];
+
+  return `${buyer.company_name.trim().toLowerCase()}|${websiteHost}`;
+}
+
 export default function Home() {
   const [targetProduct, setTargetProduct] = useState(DEFAULT_TARGET_PRODUCT);
   const [numResults, setNumResults] = useState(10);
@@ -54,20 +85,7 @@ export default function Home() {
       setLoading(true);
 
       try {
-        const response = await fetch("http://localhost:8000/api/buyers");
-
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => null);
-          throw new Error(errorData?.detail || "Saved buyers could not be loaded.");
-        }
-
-        const result: { buyers: StoredBuyer[] } = await response.json();
-        const savedBuyers = result.buyers.map((buyer) => ({
-          ...buyer,
-          buyer_id: buyer.id,
-          database_saved: true,
-          email_available: (buyer.emails ?? []).length > 0,
-        }));
+        const savedBuyers = (await fetchSavedBuyers()).map(normalizeBuyer);
 
         setData({
           success: true,
@@ -121,8 +139,26 @@ export default function Home() {
       }
 
       const result: DiscoveryResponse = await response.json();
+      const savedBuyers = (await fetchSavedBuyers())
+        .filter(
+          (buyer) =>
+            buyer.target_product?.trim().toLowerCase() ===
+            targetProduct.trim().toLowerCase()
+        )
+        .map(normalizeBuyer);
 
-      setData(result);
+      const buyersByIdentity = new Map(
+        savedBuyers.map((buyer) => [getBuyerIdentity(buyer), buyer])
+      );
+
+      result.buyers.forEach((buyer) => {
+        buyersByIdentity.set(getBuyerIdentity(buyer), buyer);
+      });
+
+      setData({
+        ...result,
+        buyers: Array.from(buyersByIdentity.values()),
+      });
     } catch (err) {
       setError(
         err instanceof Error
