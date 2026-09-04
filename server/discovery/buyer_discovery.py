@@ -7,6 +7,7 @@ from extraction.contact_extractor import extract_contacts
 from classification.gemini_classifier import classify_business
 from extraction.buyer_contact_discovery import discover_buyer_contacts
 from validation.email_validator import validate_email
+from outreach.email_composer import compose_personalized_email
 from database.connection import get_db_connection
 
 
@@ -805,7 +806,9 @@ def ensure_buyer_outreach_columns(cursor) -> None:
         ADD COLUMN IF NOT EXISTS outreach_status TEXT DEFAULT 'NOT_CONTACTED',
         ADD COLUMN IF NOT EXISTS last_contacted_at TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS contact_attempts INTEGER DEFAULT 0,
-        ADD COLUMN IF NOT EXISTS last_contact_error TEXT
+        ADD COLUMN IF NOT EXISTS last_contact_error TEXT,
+        ADD COLUMN IF NOT EXISTS email_subject TEXT,
+        ADD COLUMN IF NOT EXISTS email_body TEXT
         """
     )
 
@@ -945,9 +948,13 @@ def save_buyer_to_database(
                 reason,
                 source,
                 source_url,
-                search_query
+                search_query,
+                email_subject,
+                email_body
             )
             VALUES (
+                %s,
+                %s,
                 %s,
                 %s,
                 %s,
@@ -973,7 +980,9 @@ def save_buyer_to_database(
                 reason = EXCLUDED.reason,
                 source = EXCLUDED.source,
                 source_url = EXCLUDED.source_url,
-                search_query = EXCLUDED.search_query
+                search_query = EXCLUDED.search_query,
+                email_subject = EXCLUDED.email_subject,
+                email_body = EXCLUDED.email_body
         """
 
         cursor.execute(
@@ -1006,6 +1015,14 @@ def save_buyer_to_database(
                 ),
                 result.get(
                     "search_query",
+                    "",
+                ),
+                result.get(
+                    "email_subject",
+                    "",
+                ),
+                result.get(
+                    "email_body",
                     "",
                 ),
             ),
@@ -1341,6 +1358,19 @@ def discover_buyers(
                 result["email_available"]
                 and not result["already_contacted"]
             )
+
+            if result["ready_for_outreach"]:
+                email_draft = compose_personalized_email(
+                    buyer=result,
+                    target_product=target_product,
+                )
+
+                result["email_subject"] = email_draft[
+                    "subject"
+                ]
+                result["email_body"] = email_draft[
+                    "body"
+                ]
 
             # ------------------------------------------
             # SAVE CONFIRMED BUYER TO POSTGRESQL
