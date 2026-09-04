@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from extraction.result_parser import parse_search_results
+from extraction.website_fetcher import fetch_website
 
 from search.serper import search_buyers
 
@@ -53,3 +54,7 @@ def search_buyer_api(request: BuyerSearchRequest):
             status_code=500,
             detail=str(error),
         )
+
+@app.get("/api/extraction/website")
+def extract_website(url: str):
+    return fetch_website(url)
