@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from extraction.result_parser import parse_search_results
 from extraction.website_fetcher import fetch_website
+from extraction.contact_extractor import extract_contacts
 
 from search.serper import search_buyers
 
@@ -58,3 +59,7 @@ def search_buyer_api(request: BuyerSearchRequest):
 @app.get("/api/extraction/website")
 def extract_website(url: str):
     return fetch_website(url)
+
+@app.get("/api/extraction/contacts")
+def extract_contacts_api(text: str):
+    return extract_contacts(text)
