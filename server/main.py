@@ -5,6 +5,7 @@ from extraction.result_parser import parse_search_results
 from extraction.website_fetcher import fetch_website
 from extraction.contact_extractor import extract_contacts
 from validation.email_validator import validate_email
+from classification.ollama_classifier import classify_business
 
 from search.serper import search_buyers
 
@@ -68,3 +69,20 @@ def extract_contacts_api(text: str):
 @app.get("/api/validation/email")
 def validate_email_api(email: str):
     return validate_email(email)
+
+@app.post("/api/classification/business")
+def classify_business_api(
+    text: str,
+    target_product: str = "Singing Bowls",
+):
+    try:
+        return classify_business(
+            text=text,
+            target_product=target_product,
+        )
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=str(error),
+        )
