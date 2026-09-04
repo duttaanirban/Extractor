@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from extraction.result_parser import parse_search_results
 
 from search.serper import search_buyers
 
@@ -40,9 +41,11 @@ def search_buyer_api(request: BuyerSearchRequest):
             num_results=request.num_results,
         )
 
+        buyers = parse_search_results(results)
+
         return {
             "success": True,
-            "results": results,
+            "buyers": buyers,
         }
 
     except Exception as error:
